@@ -7,4 +7,4 @@ spring:
     password: ${DB_PASSWORD}
   sql:
     init:
-      mode: always
+      mode: never       # always / never / embedded
