@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.warehouse.receiving.mapper.ReceiptMapper">
+
+    <insert id="insertReceipt" useGeneratedKeys="true" keyProperty="receiptId" keyColumn="receipt_id">
+        INSERT INTO receipt (po_id, received_by, received_at, carrier_reference, notes)
+        VALUES (#{poId}, #{receivedBy}, #{receivedAt}, #{carrierReference}, #{notes})
+    </insert>
+
+    <insert id="insertReceiptLine" useGeneratedKeys="true" keyProperty="receiptLineId" keyColumn="receipt_line_id">
+        INSERT INTO receipt_line (receipt_id, po_line_id, location_id, quantity_received, quantity_damaged)
+        VALUES (#{receiptId}, #{poLineId}, #{locationId}, #{quantityReceived}, #{quantityDamaged})
+    </insert>
+
+    <resultMap id="receiptWithLines" type="Receipt">
+        <id     property="receiptId"        column="receipt_id"/>
+        <result property="poId"             column="po_id"/>
+        <result property="receivedBy"       column="received_by"/>
+        <result property="receivedAt"       column="received_at"/>
+        <result property="carrierReference" column="carrier_reference"/>
+        <result property="notes"            column="notes"/>
+        <collection property="lines" ofType="ReceiptLine">
+            <id     property="receiptLineId"    column="receipt_line_id"/>
+            <result property="receiptId"        column="line_receipt_id"/>
+            <result property="poLineId"         column="po_line_id"/>
+            <result property="locationId"       column="location_id"/>
+            <result property="quantityReceived" column="quantity_received"/>
+            <result property="quantityDamaged"  column="quantity_damaged"/>
+            <result property="sku"              column="sku"/>
+            <result property="locationCode"     column="location_code"/>
+        </collection>
+    </resultMap>
+
+    <select id="findById" resultMap="receiptWithLines">
+        SELECT r.receipt_id,
+               r.po_id,
+               r.received_by,
+               r.received_at,
+               r.carrier_reference,
+               r.notes,
+               rl.receipt_line_id,
+               rl.receipt_id AS line_receipt_id,
+               rl.po_line_id,
+               rl.location_id,
+               rl.quantity_received,
+               rl.quantity_damaged,
+               p.sku,
+               l.location_code
+        FROM receipt r
+        LEFT JOIN receipt_line rl        ON rl.receipt_id = r.receipt_id
+        LEFT JOIN purchase_order_line pol ON pol.po_line_id = rl.po_line_id
+        LEFT JOIN product p              ON p.product_id  = pol.product_id
+        LEFT JOIN location l             ON l.location_id = rl.location_id
+        WHERE r.receipt_id = #{receiptId}
+        ORDER BY rl.receipt_line_id
+    </select>
+
+</mapper>

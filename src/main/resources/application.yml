@@ -8,3 +8,9 @@ spring:
   sql:
     init:
       mode: never       # always / never / embedded
+
+mybatis:
+  mapper-locations: classpath:mybatis/mappers/*.xml
+  type-aliases-package: com.warehouse.receiving.domain
+  configuration:
+    map-underscore-to-camel-case: true

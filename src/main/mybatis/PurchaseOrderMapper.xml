@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.warehouse.receiving.mapper.PurchaseOrderMapper">
+
+    <resultMap id="purchaseOrderWithLines" type="PurchaseOrder">
+        <id     property="poId"         column="po_id"/>
+        <result property="poNumber"     column="po_number"/>
+        <result property="vendorId"     column="vendor_id"/>
+        <result property="status"       column="status"/>
+        <result property="orderDate"    column="order_date"/>
+        <result property="expectedDate" column="expected_date"/>
+        <result property="createdAt"    column="created_at"/>
+        <result property="createdBy"    column="created_by"/>
+        <result property="updatedAt"    column="updated_at"/>
+        <result property="updatedBy"    column="updated_by"/>
+
+        <association property="vendor" javaType="Vendor">
+            <id     property="vendorId"   column="vendor_id"/>
+            <result property="vendorCode" column="vendor_code"/>
+            <result property="name"       column="vendor_name"/>
+            <result property="active"     column="vendor_active"/>
+        </association>
+
+        <collection property="lines" ofType="PurchaseOrderLine">
+            <id     property="poLineId"           column="po_line_id"/>
+            <result property="poId"               column="line_po_id"/>
+            <result property="lineNumber"         column="line_number"/>
+            <result property="productId"          column="product_id"/>
+            <result property="quantityOrdered"    column="quantity_ordered"/>
+            <result property="quantityReceived"   column="quantity_received"/>
+            <result property="unitCost"           column="unit_cost"/>
+            <result property="sku"                column="sku"/>
+            <result property="productDescription" column="product_description"/>
+        </collection>
+    </resultMap>
+
+    <select id="findById" resultMap="purchaseOrderWithLines">
+        SELECT po.po_id,
+               po.po_number,
+               po.vendor_id,
+               po.status,
+               po.order_date,
+               po.expected_date,
+               po.created_at,
+               po.created_by,
+               po.updated_at,
+               po.updated_by,
+               v.vendor_code,
+               v.name        AS vendor_name,
+               v.active      AS vendor_active,
+               pol.po_line_id,
+               pol.po_id     AS line_po_id,
+               pol.line_number,
+               pol.product_id,
+               pol.quantity_ordered,
+               pol.quantity_received,
+               pol.unit_cost,
+               p.sku,
+               p.description AS product_description
+        FROM purchase_order po
+        JOIN vendor v            ON v.vendor_id  = po.vendor_id
+        LEFT JOIN purchase_order_line pol ON pol.po_id = po.po_id
+        LEFT JOIN product p      ON p.product_id = pol.product_id
+        WHERE po.po_id = #{poId}
+        ORDER BY pol.line_number
+    </select>
+
+    <select id="findLineById" resultType="PurchaseOrderLine">
+        SELECT pol.po_line_id,
+               pol.po_id,
+               pol.line_number,
+               pol.product_id,
+               pol.quantity_ordered,
+               pol.quantity_received,
+               pol.unit_cost,
+               p.sku,
+               p.description AS product_description
+        FROM purchase_order_line pol
+        JOIN product p ON p.product_id = pol.product_id
+        WHERE pol.po_line_id = #{poLineId}
+    </select>
+
+    <select id="search" resultType="com.warehouse.receiving.dto.PurchaseOrderSummary">
+        SELECT po.po_id,
+               po.po_number,
+               v.vendor_code,
+               v.name AS vendor_name,
+               po.status,
+               po.order_date,
+               po.expected_date,
+               COUNT(pol.po_line_id)                  AS line_count,
+               COALESCE(SUM(pol.quantity_ordered), 0)  AS total_ordered,
+               COALESCE(SUM(pol.quantity_received), 0) AS total_received
+        FROM purchase_order po
+        JOIN vendor v ON v.vendor_id = po.vendor_id
+        LEFT JOIN purchase_order_line pol ON pol.po_id = po.po_id
+        <where>
+            <if test="criteria.statuses != null and !criteria.statuses.isEmpty()">
+                AND po.status IN
+                <foreach item="s" collection="criteria.statuses" open="(" separator="," close=")">
+                    #{s}
+                </foreach>
+            </if>
+            <if test="criteria.vendorId != null">
+                AND po.vendor_id = #{criteria.vendorId}
+            </if>
+            <if test="criteria.poNumberContains != null and criteria.poNumberContains != ''">
+                AND LOWER(po.po_number) LIKE LOWER('%' || #{criteria.poNumberContains} || '%')
+            </if>
+        </where>
+        GROUP BY po.po_id, po.po_number, v.vendor_code, v.name, po.status, po.order_date, po.expected_date
+        ORDER BY ${criteria.sort.columnName}
+    </select>
+
+    <select id="lockHeader" resultType="long">
+        SELECT po_id
+        FROM purchase_order
+        WHERE po_id = #{poId}
+        FOR UPDATE
+    </select>
+
+    <update id="addToLineReceivedQuantity">
+        UPDATE purchase_order_line
+        SET quantity_received = quantity_received + #{delta}
+        WHERE po_line_id = #{poLineId}
+    </update>
+
+    <update id="updateStatus">
+        UPDATE purchase_order
+        SET status     = #{status},
+            updated_at = now(),
+            updated_by = #{updatedBy}
+        WHERE po_id = #{poId}
+    </update>
+
+</mapper>

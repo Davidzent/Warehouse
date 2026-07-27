@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.warehouse.receiving.mapper.InventoryMapper">
+    <insert id="upsertAddQuantity"> 
+        INSERT INTO inventory (product_id, location_id,quantity_on_hand) 
+        VALUES                (#{productId}, #{locationId}, #{quantity}) 
+        ON CONFLICT           (product_id,location_id) 
+        DO UPDATE SET quantity_on_hand = inventory.quantity_on_hand + EXCLUDED.quantity_on_hand, updated_at = now() 
+    </insert>
+
+    <select id="findByProductAndLocation" resultType="Inventory"> 
+        SELECT inv.inventory_id, inv.product_id, inv.location_id, inv.quantity_on_hand, inv.updated_at 
+        FROM inventory inv
+        WHERE inv.product_id = #{productId} AND inv.location_id = #{locationId} 
+    </select>
+
+    <select id="findAll" resultType="Inventory"> 
+        SELECT inv.inventory_id, inv.product_id, inv.location_id, inv.quantity_on_hand, inv.updated_at, 
+               p.sku, p.description     AS product_description, l.location_code 
+        FROM inventory inv 
+        JOIN product p                  ON p.product_id = inv.product_id 
+        JOIN location l                 ON l.location_id = inv.location_id 
+        ORDER BY p.sku, l.location_code 
+    </select>
+</mapper>
