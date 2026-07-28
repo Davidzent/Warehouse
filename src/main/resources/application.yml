@@ -7,10 +7,21 @@ spring:
     password: ${DB_PASSWORD}
   sql:
     init:
-      mode: never       # always / never / embedded
+      mode: always       # always / never / embedded
+  security:
+    user:
+      name: dev
+      password: dev
 
 mybatis:
-  mapper-locations: classpath:mybatis/mappers/*.xml
+  mapper-locations: classpath:mybatis/*.xml
   type-aliases-package: com.warehouse.receiving.domain
   configuration:
     map-underscore-to-camel-case: true
+
+server:
+  port: 8080
+
+app:
+  security:
+    jwt-secret: "Zentinel-Was-Here-what-0123456789abcdef0123456789abcdef"
