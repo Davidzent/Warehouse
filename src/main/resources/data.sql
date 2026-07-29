@@ -1,13 +1,11 @@
 -- ============================================================================
--- Seed data. Deliberately CONSISTENT: every denormalized running total
--- (purchase_order_line.quantity_received) matches the receipt_line rows that
--- justify it, and inventory matches the good (undamaged) units received.
--- Run the reconciliation query from schema.sql against this data: zero rows.
+-- Seed data, deliberately kept consistent: each purchase_order_line.quantity_received
+-- matches the receipt_line rows behind it, and inventory reflects only good
+-- (undamaged) units. The reconciliation query in schema.sql should return zero rows.
 --
--- Explicit ids in seed scripts keep tests readable ("PO 1000 has line 2000"),
--- but identity columns keep their own counters — so after inserting explicit
--- ids we must bump each counter past the seeded values (see setval calls at
--- the bottom), or the first runtime INSERT would collide with id 1.
+-- Ids are explicit so tests can reference them directly. Identity counters do not
+-- advance for explicit inserts, so the setval calls at the bottom move each past
+-- the seeded range — without them the first runtime INSERT collides at id 1.
 -- ============================================================================
 
 INSERT INTO vendor (vendor_id, vendor_code, name, active) VALUES
