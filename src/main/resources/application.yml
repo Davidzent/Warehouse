@@ -1,4 +1,6 @@
 spring:
+  profiles:
+    default: dev
   application:
     name: receiving
   datasource:
@@ -19,9 +21,13 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
 
+logging:
+  level:
+    com.warehouse.receiving.mapper: DEBUG
+
 server:
   port: 8080
 
 app:
   security:
-    jwt-secret: "Zentinel-Was-Here-what-0123456789abcdef0123456789abcdef"
+    jwt-secret: ${JWT_SECRET:}
