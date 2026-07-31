@@ -366,7 +366,6 @@ An honest list — these are next, not oversights:
 - **HS256 shared secret.** Reasonable for a single service with a dev token endpoint. A real
   deployment belongs behind an identity provider with asymmetric keys and JWKS rotation.
 - **No pagination.** `/api/inventory` and `/api/locations` return everything.
-- **No container.** No Dockerfile or compose file yet, so PostgreSQL setup is manual.
 - **Server clock.** The service calls `OffsetDateTime.now()` directly rather than an injected `Clock`,
   which makes time harder to assert in tests.
 
