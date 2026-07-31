@@ -1,6 +1,6 @@
 spring:
   profiles:
-    default: dev
+    default: prod
   application:
     name: receiving
   datasource:
@@ -9,7 +9,7 @@ spring:
     password: ${DB_PASSWORD}
   sql:
     init:
-      mode: always       # always / never / embedded
+      mode: never       # always / never / embedded
   security:
     user:
       name: dev
@@ -26,8 +26,8 @@ logging:
     com.warehouse.receiving.mapper: DEBUG
 
 server:
-  port: 8080
+  port: ${PORT:8080}
 
 app:
   security:
-    jwt-secret: ${JWT_SECRET:}
+    jwt-secret: ${JWT_SECRET:Zentinel-Was-Here-what-0123456789abcdef0123456789abcdef}

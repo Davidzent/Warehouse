@@ -14,6 +14,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.warehouse.receiving.service.exception.BusinessConflictException;
 import com.warehouse.receiving.service.exception.InvalidReceiptException;
@@ -21,18 +22,14 @@ import com.warehouse.receiving.service.exception.PurchaseOrderNotFoundException;
 import com.warehouse.receiving.service.exception.ReceiptNotFoundException;
 
 /**
- * BUSINESS to HTTP status codes.
- * The status-code contract of this API:
- *   201  resource created (POST /api/receipts success)
- *   200  read success
- *   400  the REQUEST is bad (malformed JSON, failed validation, bad refs)
- *        — fix the request and retry.
- *   401  no/invalid token (issued by the security filter, not this class)
- *   403  valid token, insufficient role
- *   404  the resource does not exist
- *   409  request fine, resource exists, but business STATE forbids it
- *        — receiving on a CLOSED PO, breaching the 110% cap.
- *   500  our bug. Never the client's fault, never leaks internals.
+ * BUSINESS to HTTP status codes. The status-code contract of this API: 201
+ * resource created (POST /api/receipts success) 200 read success 400 the
+ * REQUEST is bad (malformed JSON, failed validation, bad refs) — fix the
+ * request and retry. 401 no/invalid token (issued by the security filter, not
+ * this class) 403 valid token, insufficient role 404 the resource does not
+ * exist 409 request fine, resource exists, but business STATE forbids it —
+ * receiving on a CLOSED PO, breaching the 110% cap. 500 our bug. Never the
+ * client's fault, never leaks internals.
  */
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -40,10 +37,17 @@ public class ApiExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     // ---- 404 -------------------------------------------------------------
-
     @ExceptionHandler({PurchaseOrderNotFoundException.class, ReceiptNotFoundException.class})
     public ProblemDetail handleNotFound(RuntimeException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Not Found");
+        return problem;
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ProblemDetail handleNoResource(NoResourceFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.NOT_FOUND, "No endpoint at this path");
         problem.setTitle("Not Found");
         return problem;
     }
@@ -57,12 +61,11 @@ public class ApiExceptionHandler {
     }
 
     // ---- 400 -------------------------------------------------------------
-
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> fieldErrors = new LinkedHashMap<>();
-        ex.getBindingResult().getFieldErrors().forEach(fe ->
-                // merge: keep the first message if a field has several violations
+        ex.getBindingResult().getFieldErrors().forEach(fe
+                -> // merge: keep the first message if a field has several violations
                 fieldErrors.putIfAbsent(fe.getField(), fe.getDefaultMessage()));
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
                 HttpStatus.BAD_REQUEST, "Request validation failed");
@@ -112,12 +115,11 @@ public class ApiExceptionHandler {
     }
 
     // ---- 403 -------------------------------------------------------------
-
     /**
-     * Thrown by @PreAuthorize when the token's roles are insufficient.
-     * Handled explicitly so it does not fall into the 500 catch-all below.
-     * This status is what the "hidden button is not security" demo shows:
-     * a VIEWER posting via curl lands here, UI or no UI.
+     * Thrown by @PreAuthorize when the token's roles are insufficient. Handled
+     * explicitly so it does not fall into the 500 catch-all below. This status
+     * is what the "hidden button is not security" demo shows: a VIEWER posting
+     * via curl lands here, UI or no UI.
      */
     @ExceptionHandler(AccessDeniedException.class)
     public ProblemDetail handleAccessDenied(AccessDeniedException ex) {
