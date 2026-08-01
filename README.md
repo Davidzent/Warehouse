@@ -8,7 +8,10 @@ several trips. Suppliers ship **more than you ordered**. Boxes arrive **damaged*
 physically exist but must never become sellable stock. Two clerks can scan the same pallet at the same
 moment. This service is built around those cases rather than around the happy path.
 
-Java 17 · Spring Boot 4.1 · MyBatis · PostgreSQL
+Java 17 · Spring Boot 4.1 · MyBatis · PostgreSQL · Docker
+
+**Live:** [warehouse.zntsns.com](https://warehouse.zntsns.com) — deployed on Render against Supabase
+PostgreSQL. First request after idle takes 30–60s (free tier cold start).
 
 ---
 
@@ -19,8 +22,10 @@ Java 17 · Spring Boot 4.1 · MyBatis · PostgreSQL
 - [Endpoints](#endpoints)
 - [Error contract](#error-contract)
 - [Quickstart](#quickstart)
+- [Run with Docker](#run-with-docker)
 - [Walk the interesting paths](#walk-the-interesting-paths)
 - [Testing](#testing)
+- [Deployment](#deployment)
 - [Design decisions](#design-decisions)
 - [Known limitations](#known-limitations)
 
@@ -56,7 +61,7 @@ flowchart TD
 
     SVC -.->|domain exceptions| EH["ApiExceptionHandler<br/>RFC 7807 ProblemDetail"]
     RC -.-> EH
-    EH -.->|400 / 403 / 404 / 409 / 500| C
+    EH -.->|400 / 403 / 404 / 405 / 409 / 500| C
 ```
 
 Four layers, one direction. Domain exceptions are thrown where the rule lives — in the service — and
@@ -133,15 +138,15 @@ Content-Type: application/json
 }
 ```
 
-`201 Created`, `Location: /api/receipts/3002`:
+`201 Created`, `Location: /api/receipts/5001`:
 
 ```json
 {
-  "receiptId": 3002,
+  "receiptId": 5001,
   "purchaseOrderId": 1000,
   "purchaseOrderStatusAfter": "PARTIALLY_RECEIVED",
   "receivedBy": "dgtest",
-  "receivedAt": "2026-07-29T18:04:11.512Z",
+  "receivedAt": "2026-07-31T18:04:11.512Z",
   "lines": [
     { "poLineId": 2000, "sku": "SKU-BOLT-M8", "quantityReceived": 50,
       "quantityDamaged": 2, "goodQuantity": 48, "locationId": 101 }
@@ -162,7 +167,8 @@ Every failure returns [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807) 
 | `400` | The **request** is wrong — fix and retry | validation failure, malformed JSON, duplicate line, line on another PO |
 | `401` | No or invalid token | missing `Authorization` header |
 | `403` | Valid token, insufficient role | `VIEWER` posting a receipt |
-| `404` | Resource does not exist | unknown PO or receipt id |
+| `404` | Resource or route does not exist | unknown PO id, unmapped path |
+| `405` | Route exists, wrong verb | `GET` on `/api/receipts` — response carries an `Allow` header |
 | `409` | Request is fine, business **state** forbids it | receiving on a `CLOSED` PO, breaching the 110% cap |
 | `500` | Our bug — logged server-side, never leaks internals | — |
 
@@ -181,31 +187,51 @@ Validation failures name every offending field:
 }
 ```
 
+Framework-level failures (unmapped route, wrong verb) are mapped explicitly rather than falling into
+the `500` catch-all — a generic handler that swallows `NoResourceFoundException` turns every typo into
+a fake server error.
+
 ---
 
 ## Quickstart
 
-**Prerequisites:** JDK 17+, a local PostgreSQL, and a `warehouse` database.
+**Prerequisites:** JDK 17+ and a PostgreSQL database named `warehouse`.
 
 ```bash
 createdb warehouse
 ```
 
-`schema.sql` and `data.sql` run on every startup (`spring.sql.init.mode=always`), so the database is
-dropped and reseeded on each boot. Point this at nothing you care about.
+### Create the schema
 
-Two environment variables are required:
+`spring.sql.init.mode` is **`never`**, so the app does not touch your schema on startup. Load it once:
+
+```bash
+psql -d warehouse -f src/main/resources/schema.sql
+psql -d warehouse -f src/main/resources/data.sql
+```
+
+To reseed on every boot instead — useful while the schema is still moving — run with
+`--spring.sql.init.mode=always`. Note that `schema.sql` **drops and recreates every table**, so point
+that at nothing you care about.
+
+### Environment
 
 ```bash
 export DB_PASSWORD='your-postgres-password'
 export JWT_SECRET="$(openssl rand -base64 48)"
 ```
 
-`JWT_SECRET` must be **at least 32 bytes** — HS256 rejects anything shorter. There is no fallback
-value; the app fails at startup rather than booting with a guessable key.
+`JWT_SECRET` must be **at least 32 bytes** — HS256 rejects anything shorter, and the app fails at
+startup rather than booting with an undersized key. A development fallback exists in
+`application.yml` so a fresh clone runs, but any deployment must override it.
+
+### Run
+
+The default profile is **`prod`**, which excludes the dev token endpoint. For local work, activate
+`dev`:
 
 ```bash
-./mvnw spring-boot:run          # Windows: mvnw.cmd spring-boot:run
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev     # Windows: mvnw.cmd
 ```
 
 Serves on `http://localhost:8080`.
@@ -239,6 +265,32 @@ curl -s localhost:8080/api/purchase-orders/1000 -H "Authorization: Bearer $TOKEN
 | `1003` | `CANCELLED` | — |
 
 Locations: `100` DOCK-01 · `101` A-01-01 · `102` A-01-02 · `103` QC-HOLD (quarantine).
+
+---
+
+## Run with Docker
+
+The compose stack brings up the API and its own PostgreSQL — no local database required.
+
+```bash
+cp .env.example .env      # then fill in the values
+docker compose up --build
+```
+
+`.env` supplies:
+
+```
+DB_PASSWORD=warehouse
+JWT_SECRET=<32+ characters>
+SPRING_PROFILES_ACTIVE=dev
+```
+
+The `Dockerfile` is multi-stage: Maven builds the jar, and only a JRE plus the artifact ship in the
+final image — roughly 200 MB instead of 800 MB.
+
+Note that inside the compose network the database host is `db`, not `localhost` — the app reaches it
+through `SPRING_DATASOURCE_URL`, which overrides `application.yml` via Spring's relaxed binding. The
+same image therefore runs unchanged locally, in compose, and in production.
 
 ---
 
@@ -306,20 +358,47 @@ curl -i localhost:8080/api/inventory
 ./mvnw test
 ```
 
-20 test methods across two suites, each testing at the level where it belongs.
+**23 tests** across three suites, each testing at the level where it belongs.
 
-| Suite | Methods | Approach | Covers |
+| Suite | Tests | Approach | Covers |
 |---|---|---|---|
-| `ReceivingServiceTest` | 9 `@Test` + 1 `@ParameterizedTest` | Mockito-mocked mappers | Business rules in isolation: the tolerance boundary at exactly 110%, damaged-unit split, fully damaged delivery, duplicate and foreign lines, status transitions, and every terminal PO state via `@EnumSource`. Rejected requests are asserted to write **nothing**. |
-| `MapperIntegrationTest` | 11 `@Test` in 5 `@Nested` groups | Real PostgreSQL, no mocks | Actual SQL: `resultMap` assembly of header + vendor + lines from joined rows, dynamic search (`<foreach>` `IN` clause, combined filters, sort allowlist), atomic in-place increment, audit-column maintenance, generated-key population, and `ON CONFLICT` upsert both inserting and accumulating. |
+| `ReceivingServiceTest` | 11 | Mockito-mocked mappers | Business rules in isolation: the tolerance boundary at exactly 110%, damaged-unit split, fully damaged delivery, duplicate and foreign lines, status transitions, and every terminal PO state via `@EnumSource`. Rejected requests are asserted to write **nothing**. |
+| `MapperIntegrationTest` | 11 | Real PostgreSQL, no mocks | Actual SQL: `resultMap` assembly of header + vendor + lines from joined rows, dynamic search (`<foreach>` `IN` clause, combined filters, sort allowlist), atomic in-place increment, audit-column maintenance, generated-key population, and `ON CONFLICT` upsert both inserting and accumulating. |
+| `ReceivingApplicationTests` | 1 | Full `@SpringBootTest` | Context startup — proves every bean can actually be constructed. Catches wiring failures no unit test sees. |
 
 Mapper tests run against a real database started in-process by
-[zonky embedded-postgres](https://github.com/zonkyio/embedded-postgres) — no local server needed for
-`./mvnw test`. That is the point: a mocked mapper passes happily with a broken `<foreach>` or a wrong
-`ON CONFLICT` clause, so the SQL is tested as SQL.
+[zonky embedded-postgres](https://github.com/zonkyio/embedded-postgres) — no local server needed. That
+is the point: a mocked mapper passes happily with a broken `<foreach>` or a wrong `ON CONFLICT` clause,
+so the SQL is exercised as SQL.
 
-`ReceivingApplicationTests` additionally smoke-tests context startup, which does need the local
-PostgreSQL and both environment variables.
+---
+
+## Deployment
+
+Deployed as a single container: **Render** (app) → **Supabase** (managed PostgreSQL), with
+`warehouse.zntsns.com` pointed at Render via CNAME.
+
+Nothing environment-specific is baked into the image. Render supplies:
+
+```
+SPRING_DATASOURCE_URL       jdbc:postgresql://<host>:5432/postgres?sslmode=require
+SPRING_DATASOURCE_USERNAME  postgres
+SPRING_DATASOURCE_PASSWORD  ****
+JWT_SECRET                  ****
+PORT                        (injected by Render)
+```
+
+Spring's relaxed binding maps those onto `spring.datasource.*`, and environment variables outrank
+`application.yml` — so the same artifact that runs locally runs in production untouched. The schema was
+loaded once through Supabase's SQL editor, since `sql.init.mode` is `never`.
+
+A single-origin deployment is deliberate: the API and any future UI ship together, so there is no CORS
+surface and one service to keep warm. Warehouse tooling is typically internal and served from the
+application server, so this matches the domain rather than defaulting to a split SPA/API topology.
+
+**The live instance runs with the `dev` profile so the token endpoint is reachable for demonstration.**
+That is a demo affordance, not a production posture — a real deployment runs `prod`, where
+`/api/auth/dev-token` does not exist and tokens come from an identity provider.
 
 ---
 
@@ -358,16 +437,18 @@ even if a future code path forgets.
 
 An honest list — these are next, not oversights:
 
-- **No migrations.** `schema.sql` drops and recreates on every boot. Fine for a demo, wrong for
-  anything real; Flyway or Liquibase is the fix.
+- **No migrations.** Schema changes are applied by hand from `schema.sql`, which drops and recreates.
+  Flyway or Liquibase is the fix, and would replace `spring.sql.init` entirely.
 - **PO search is not exposed.** `ReceivingService.searchPurchaseOrders` and the dynamic-SQL mapper
   behind it are implemented and tested, but no controller route reaches them yet.
-- **No CI.** `./mvnw verify` passes locally; it should run on every push.
+- **No CI.** `./mvnw verify` passes locally; it should run on every push. The Docker build skips tests,
+  so a broken commit currently still deploys.
 - **HS256 shared secret.** Reasonable for a single service with a dev token endpoint. A real
   deployment belongs behind an identity provider with asymmetric keys and JWKS rotation.
 - **No pagination.** `/api/inventory` and `/api/locations` return everything.
 - **Server clock.** The service calls `OffsetDateTime.now()` directly rather than an injected `Clock`,
   which makes time harder to assert in tests.
+- **No UI.** The API is the deliverable; a receiving screen is the next addition.
 
 The schema carries dialect notes for DB2 — identity columns, `MERGE` versus `ON CONFLICT`, `TIMESTAMP`
 versus `TIMESTAMPTZ` — so the design ports to an enterprise DB2 environment without a rewrite.
