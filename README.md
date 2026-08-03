@@ -8,6 +8,8 @@ several trips. Suppliers ship **more than you ordered**. Boxes arrive **damaged*
 physically exist but must never become sellable stock. Two clerks can scan the same pallet at the same
 moment. This service is built around those cases rather than around the happy path.
 
+[![Java CI with Maven](https://github.com/Davidzent/Warehouse-API/actions/workflows/maven.yml/badge.svg)](https://github.com/Davidzent/Warehouse-API/actions/workflows/maven.yml)
+
 Java 17 · Spring Boot 4.1 · MyBatis · PostgreSQL · Docker
 
 **Live:** [warehouse.zntsns.com](https://warehouse.zntsns.com) — deployed on Render against Supabase
@@ -25,6 +27,7 @@ PostgreSQL. First request after idle takes 30–60s (free tier cold start).
 - [Run with Docker](#run-with-docker)
 - [Walk the interesting paths](#walk-the-interesting-paths)
 - [Testing](#testing)
+  - [Continuous integration](#continuous-integration)
 - [Deployment](#deployment)
 - [Design decisions](#design-decisions)
 - [Known limitations](#known-limitations)
@@ -371,6 +374,19 @@ Mapper tests run against a real database started in-process by
 is the point: a mocked mapper passes happily with a broken `<foreach>` or a wrong `ON CONFLICT` clause,
 so the SQL is exercised as SQL.
 
+The whole suite is self-contained — no database, no environment variables, no setup — which is what
+lets it run unchanged on a CI runner.
+
+### Continuous integration
+
+[`.github/workflows/maven.yml`](.github/workflows/maven.yml) runs `./mvnw -B verify` on every push and
+pull request to `main`, and submits the resolved dependency tree to GitHub's dependency graph so
+Dependabot can see **transitive** vulnerabilities — the nine dependencies in `pom.xml` resolve to
+around a hundred artifacts, and most of the real surface is in the ones never written down.
+
+CI runs the wrapper rather than the runner's Maven, so the build uses the version pinned in `.mvn/`,
+and on the same JDK 21 the production image is built with.
+
 ---
 
 ## Deployment
@@ -391,6 +407,13 @@ PORT                        (injected by Render)
 Spring's relaxed binding maps those onto `spring.datasource.*`, and environment variables outrank
 `application.yml` — so the same artifact that runs locally runs in production untouched. The schema was
 loaded once through Supabase's SQL editor, since `sql.init.mode` is `never`.
+
+Connections go through Supabase's **session-mode pooler**, not the direct endpoint. Render's egress is
+IPv4-only while Supabase's direct host resolves to IPv6, so a direct connection fails with
+`SocketException: Network unreachable` — a connection error rather than an authentication one, which
+is what distinguishes it from a bad password. Session mode is used rather than transaction mode
+(port 6543) because transaction pooling disables server-side prepared statements, which MyBatis relies
+on for every `#{}` parameter.
 
 A single-origin deployment is deliberate: the API and any future UI ship together, so there is no CORS
 surface and one service to keep warm. Warehouse tooling is typically internal and served from the
@@ -441,8 +464,10 @@ An honest list — these are next, not oversights:
   Flyway or Liquibase is the fix, and would replace `spring.sql.init` entirely.
 - **PO search is not exposed.** `ReceivingService.searchPurchaseOrders` and the dynamic-SQL mapper
   behind it are implemented and tested, but no controller route reaches them yet.
-- **No CI.** `./mvnw verify` passes locally; it should run on every push. The Docker build skips tests,
-  so a broken commit currently still deploys.
+- **CI does not gate deployment.** GitHub Actions runs the full suite on every push, but Render
+  deploys from the same push independently — and the Docker build uses `-DskipTests`. A red build and
+  a successful deploy can therefore happen at once. Gating on the workflow, or building the image in
+  CI and having Render pull it, would close that.
 - **HS256 shared secret.** Reasonable for a single service with a dev token endpoint. A real
   deployment belongs behind an identity provider with asymmetric keys and JWKS rotation.
 - **No pagination.** `/api/inventory` and `/api/locations` return everything.
