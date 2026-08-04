@@ -31,3 +31,4 @@ server:
 app:
   security:
     jwt-secret: ${JWT_SECRET:Zentinel-Was-Here-what-0123456789abcdef0123456789abcdef}
+    allowed-origins: ${ALLOWED_ORIGINS:https://www.zntsns.com,https://zntsns.com}
