@@ -24,8 +24,12 @@ public class RateLimiter {
     /** Access-ordered LRU. Synchronized because eviction observes the whole map. */
     private final Map<String, Bucket> buckets;
 
+    /** Held outside the map on purpose: an evicted global bucket would come back full. */
+    private final Bucket globalWrite;
+
     public RateLimiter(RateLimitProperties properties) {
         this.properties = properties;
+        this.globalWrite = new Bucket(properties.getGlobalWritePerMinute());
         int cap = properties.getMaxTrackedClients();
         this.buckets = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
             @Override
@@ -35,10 +39,20 @@ public class RateLimiter {
         });
     }
 
+    /**
+     * Writes are metered twice: once against the caller, then against everyone.
+     * A caller already over its own limit never reaches the shared budget, so a
+     * flood cannot starve the global bucket faster than it is refused anyway.
+     */
     public Decision check(String clientId, Tier tier) {
         int permits = permitsFor(tier);
         Bucket bucket = buckets.computeIfAbsent(clientId + '|' + tier, key -> new Bucket(permits));
-        return bucket.tryConsume(System.nanoTime());
+        Decision perClient = bucket.tryConsume(System.nanoTime());
+
+        if (!perClient.allowed() || tier != Tier.WRITE) {
+            return perClient;
+        }
+        return globalWrite.tryConsume(System.nanoTime());
     }
 
     private int permitsFor(Tier tier) {

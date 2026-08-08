@@ -17,6 +17,13 @@ public class RateLimitProperties {
     private int readPerMinute = 60;
 
     /**
+     * Ceiling on writes from everyone combined. Per-IP limits key on a header the
+     * client controls, so one caller rotating it has no per-IP ceiling at all;
+     * this is what actually bounds the damage.
+     */
+    private int globalWritePerMinute = 60;
+
+    /**
      * Cap on tracked buckets. X-Forwarded-For is client-supplied, so without a
      * ceiling an attacker rotating values allocates a bucket per request.
      */
@@ -52,6 +59,14 @@ public class RateLimitProperties {
 
     public void setReadPerMinute(int readPerMinute) {
         this.readPerMinute = readPerMinute;
+    }
+
+    public int getGlobalWritePerMinute() {
+        return globalWritePerMinute;
+    }
+
+    public void setGlobalWritePerMinute(int globalWritePerMinute) {
+        this.globalWritePerMinute = globalWritePerMinute;
     }
 
     public int getMaxTrackedClients() {

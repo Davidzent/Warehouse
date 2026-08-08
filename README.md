@@ -44,7 +44,7 @@ and mirrored to [Warehouse-UI](https://github.com/Davidzent/Warehouse-UI).
 
 ```mermaid
 flowchart TD
-    C[HTTP client] -->|Bearer JWT| RL["RateLimitFilter<br/>per-IP token bucket"]
+    C[HTTP client] -->|Bearer JWT| RL["RateLimitFilter<br/>per-IP + global write buckets"]
     RL -->|within budget| W
     RL -.->|429 + Retry-After| C
 
@@ -84,11 +84,12 @@ translated to HTTP in exactly one place, so no controller contains a status-code
 ```
 src/main/java/com/warehouse/receiving/
 ├── config/       SecurityConfig — JWT decoding, roles claim, CORS, method security
-│                 RateLimiter + RateLimitProperties — per-IP token buckets
+│                 RateLimiter + RateLimitProperties — per-IP and global buckets
+│                 DemoDataResetConfig — scheduled reseed, dev profile only
 ├── domain/       Vendor, Product, Location, PurchaseOrder(+Line), Receipt(+Line), Inventory, PoStatus
 ├── dto/          request/response records — deliberately narrower than the domain
 ├── mapper/       MyBatis interfaces (SQL lives in resources/mybatis/*.xml)
-├── service/      ReceivingService + domain exceptions
+├── service/      ReceivingService + domain exceptions, DemoDataResetService
 └── web/          controllers + ApiExceptionHandler + RateLimitFilter
 ```
 
@@ -215,11 +216,12 @@ The demo is public and the token endpoint hands out a role without a password, s
 capped per client IP. Three tiers, because the cost differs: minting a token is unauthenticated and
 grants a role, a write permanently changes stock, a read is harmless.
 
-| Tier | Applies to | Default | Override |
-|---|---|---|---|
-| Token mint | `POST /api/auth/**` | 5 / min | `RATE_LIMIT_TOKEN_MINT` |
-| Write | any non-`GET` under `/api` | 10 / min | `RATE_LIMIT_WRITE` |
-| Read | every `GET` | 60 / min | `RATE_LIMIT_READ` |
+| Tier | Applies to | Scope | Default | Override |
+|---|---|---|---|---|
+| Token mint | `POST /api/auth/**` | per IP | 5 / min | `RATE_LIMIT_TOKEN_MINT` |
+| Write | any non-`GET` under `/api` | per IP | 10 / min | `RATE_LIMIT_WRITE` |
+| Read | every `GET` | per IP | 60 / min | `RATE_LIMIT_READ` |
+| **Global write** | any non-`GET` under `/api` | **everyone** | 60 / min | `RATE_LIMIT_GLOBAL_WRITE` |
 
 Set `RATE_LIMIT_ENABLED=false` to turn it off entirely. A refusal is a `429` carrying `Retry-After` and
 a `ProblemDetail` whose `detail` names the wait in seconds, so a UI can say something useful:
@@ -240,9 +242,20 @@ refused without decoding a token or taking a database connection.
 
 **Clients are keyed on `X-Forwarded-For`, not `getRemoteAddr()`.** Behind Render and Cloudflare the
 latter is a proxy, so every visitor in the world would share one bucket. That header is client-supplied
-and therefore spoofable; rather than pretend otherwise, the damage is bounded — the bucket store is an
-LRU capped at `max-tracked-clients`, so rotating fake addresses costs an attacker throughput but cannot
-exhaust the heap.
+and therefore spoofable — which is the reason for the fourth tier below, not a footnote.
+
+**Per-IP limits alone would be close to worthless here.** A caller who picks their own key has no
+per-IP ceiling: one machine rotating the header gets a fresh bucket per request. The global write
+bucket is the only limit they cannot walk around, so it — not the per-IP tier — is what bounds a
+determined flood. Per-IP limiting still earns its place by stopping casual abuse and by keeping one
+noisy client from spending the whole shared budget.
+
+It is deliberately held outside the LRU that stores the per-client buckets. As a map entry it could be
+evicted under exactly the spoofing pressure it exists to survive, and would come back full —
+`globalCapSurvivesEvictionPressureFromSpoofedAddresses` pins that down.
+
+A write is metered twice: against the caller first, then against everyone. A caller already over its
+own limit never reaches the shared budget, so being refused costs it nothing shared.
 
 ---
 
@@ -438,13 +451,13 @@ curl -i localhost:8080/api/inventory
 ./mvnw test
 ```
 
-**48 tests** across seven suites, each testing at the level where it belongs.
+**52 tests** across seven suites, each testing at the level where it belongs.
 
 | Suite | Tests | Approach | Covers |
 |---|---|---|---|
 | `ReceivingServiceTest` | 11 | Mockito-mocked mappers | Business rules in isolation: the tolerance boundary at exactly 110%, damaged-unit split, fully damaged delivery, duplicate and foreign lines, status transitions, and every terminal PO state via `@EnumSource`. Rejected requests are asserted to write **nothing**. |
 | `MapperIntegrationTest` | 11 | Real PostgreSQL, no mocks | Actual SQL: `resultMap` assembly of header + vendor + lines from joined rows, dynamic search (`<foreach>` `IN` clause, combined filters, sort allowlist), atomic in-place increment, audit-column maintenance, generated-key population, and `ON CONFLICT` upsert both inserting and accumulating. |
-| `RateLimiterTest` | 7 | Plain unit test | The bucket itself: exact burst size, independent clients, tiers that don't share a budget, a positive `Retry-After`, the LRU cap holding under spoofed addresses, and a configured rate of zero degrading to one rather than dividing by zero. |
+| `RateLimiterTest` | 11 | Plain unit test | The buckets themselves: exact burst size, independent clients, tiers that don't share a budget, a positive `Retry-After`, a configured rate of zero degrading to one rather than dividing by zero, and the global write cap — bounding every client at once, leaving reads and minting alone, not being spent by an already-refused caller, and surviving eviction pressure from spoofed addresses. |
 | `RateLimitFilterTest` | 9 | `MockHttpServletRequest` + `MockFilterChain` | HTTP behaviour: tier selection by path and verb, the `ProblemDetail` body and `Retry-After` header, keying on the leftmost `X-Forwarded-For` entry, proxy hops not creating new buckets, preflights never metered, and the disable switch. |
 | `DemoDataResetServiceTest` | 5 | Real PostgreSQL, no Spring context | The reseed: receiving undone, extra receipts cleared, every table back to its seeded row count, idempotent across runs, and sequences still usable afterwards. No context on purpose — a rolled-back test transaction would hide the schema from the service's own connection. |
 | `DemoDataResetWiringTest` | 4 | Three `@SpringBootTest` contexts | Which profiles wire a job that deletes every row: present under `dev`, **absent under `prod`**, absent when the kill switch is off. |
@@ -563,8 +576,10 @@ An honest list — these are next, not oversights:
 - **Rate limiting is per instance.** The buckets live in memory, which is correct for a single
   container but multiplies the effective rate by the replica count behind more than one. That is the
   point to move to a shared store rather than extend the current class.
-- **No global write cap.** Limits are per client IP, so a distributed flood can still exhaust the
-  database's free-tier quota. A ceiling on total writes per minute would bound that.
+- **The global write cap is a blunt instrument.** One caller spending the shared budget throttles
+  everyone, since a keyless bucket cannot tell them apart. For a public demo that is the better
+  failure — a visitor told to wait 20 seconds beats a visitor finding the data trashed — but a real
+  deployment would want per-account quotas rather than a single global ceiling.
 
 The schema carries dialect notes for DB2 — identity columns, `MERGE` versus `ON CONFLICT`, `TIMESTAMP`
 versus `TIMESTAMPTZ` — so the design ports to an enterprise DB2 environment without a rewrite.

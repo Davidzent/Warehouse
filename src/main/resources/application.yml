@@ -37,6 +37,7 @@ app:
     token-mint-per-minute: ${RATE_LIMIT_TOKEN_MINT:5}
     write-per-minute: ${RATE_LIMIT_WRITE:10}
     read-per-minute: ${RATE_LIMIT_READ:60}
+    global-write-per-minute: ${RATE_LIMIT_GLOBAL_WRITE:60}
     max-tracked-clients: 20000
   demo:
     reset:
