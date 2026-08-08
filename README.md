@@ -15,6 +15,10 @@ Java 17 · Spring Boot 4.1 · MyBatis · PostgreSQL · Docker
 **Live:** [warehouse.zntsns.com](https://warehouse.zntsns.com) — deployed on Render against Supabase
 PostgreSQL. First request after idle takes 30–60s (free tier cold start).
 
+**Clerk's screen:** [zntsns.com/warehouse](https://www.zntsns.com/warehouse/) — a React front end for
+this API, built in the [ZNTSNS monorepo](https://github.com/Davidzent/ZNTSNS/tree/main/apps/warehouse)
+and mirrored to [Warehouse-UI](https://github.com/Davidzent/Warehouse-UI).
+
 ---
 
 ## Contents
@@ -23,6 +27,7 @@ PostgreSQL. First request after idle takes 30–60s (free tier cold start).
 - [Business rules](#business-rules)
 - [Endpoints](#endpoints)
 - [Error contract](#error-contract)
+- [Rate limiting](#rate-limiting)
 - [Quickstart](#quickstart)
 - [Run with Docker](#run-with-docker)
 - [Walk the interesting paths](#walk-the-interesting-paths)
@@ -38,7 +43,9 @@ PostgreSQL. First request after idle takes 30–60s (free tier cold start).
 
 ```mermaid
 flowchart TD
-    C[HTTP client] -->|Bearer JWT| W
+    C[HTTP client] -->|Bearer JWT| RL["RateLimitFilter<br/>per-IP token bucket"]
+    RL -->|within budget| W
+    RL -.->|429 + Retry-After| C
 
     subgraph W["Web layer"]
         direction TB
@@ -67,17 +74,21 @@ flowchart TD
     EH -.->|400 / 403 / 404 / 405 / 409 / 500| C
 ```
 
+The rate limiter runs ahead of authentication on purpose: the flood it exists to stop is
+unauthenticated, so refusing it must not cost a token decode or a database connection.
+
 Four layers, one direction. Domain exceptions are thrown where the rule lives — in the service — and
 translated to HTTP in exactly one place, so no controller contains a status-code decision.
 
 ```
 src/main/java/com/warehouse/receiving/
-├── config/       SecurityConfig — JWT decoding, roles claim, method security
+├── config/       SecurityConfig — JWT decoding, roles claim, CORS, method security
+│                 RateLimiter + RateLimitProperties — per-IP token buckets
 ├── domain/       Vendor, Product, Location, PurchaseOrder(+Line), Receipt(+Line), Inventory, PoStatus
 ├── dto/          request/response records — deliberately narrower than the domain
 ├── mapper/       MyBatis interfaces (SQL lives in resources/mybatis/*.xml)
 ├── service/      ReceivingService + domain exceptions
-└── web/          controllers + ApiExceptionHandler
+└── web/          controllers + ApiExceptionHandler + RateLimitFilter
 ```
 
 ---
@@ -173,6 +184,7 @@ Every failure returns [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807) 
 | `404` | Resource or route does not exist | unknown PO id, unmapped path |
 | `405` | Route exists, wrong verb | `GET` on `/api/receipts` — response carries an `Allow` header |
 | `409` | Request is fine, business **state** forbids it | receiving on a `CLOSED` PO, breaching the 110% cap |
+| `429` | Too many requests from this client | see [Rate limiting](#rate-limiting) — carries `Retry-After` |
 | `500` | Our bug — logged server-side, never leaks internals | — |
 
 Validation failures name every offending field:
@@ -193,6 +205,43 @@ Validation failures name every offending field:
 Framework-level failures (unmapped route, wrong verb) are mapped explicitly rather than falling into
 the `500` catch-all — a generic handler that swallows `NoResourceFoundException` turns every typo into
 a fake server error.
+
+---
+
+## Rate limiting
+
+The demo is public and the token endpoint hands out a role without a password, so the cost of abuse is
+capped per client IP. Three tiers, because the cost differs: minting a token is unauthenticated and
+grants a role, a write permanently changes stock, a read is harmless.
+
+| Tier | Applies to | Default | Override |
+|---|---|---|---|
+| Token mint | `POST /api/auth/**` | 5 / min | `RATE_LIMIT_TOKEN_MINT` |
+| Write | any non-`GET` under `/api` | 10 / min | `RATE_LIMIT_WRITE` |
+| Read | every `GET` | 60 / min | `RATE_LIMIT_READ` |
+
+Set `RATE_LIMIT_ENABLED=false` to turn it off entirely. A refusal is a `429` carrying `Retry-After` and
+a `ProblemDetail` whose `detail` names the wait in seconds, so a UI can say something useful:
+
+```json
+{ "title": "Too Many Requests", "status": 429, "detail": "Too many requests. Wait 20 second(s) and try again." }
+```
+
+Three decisions worth knowing:
+
+**A continuous-refill token bucket, not a fixed window.** A fixed window lets a caller spend a full
+allowance at 11:59:59 and another at 12:00:00, so the real burst is double the configured rate.
+
+**The filter sits after Spring Security's `CorsFilter` and before authorization.** After CORS, so a
+`429` still carries `Access-Control-Allow-Origin` and the browser can read the message instead of an
+opaque network error. Before authorization, so the unauthenticated flood this exists to stop is
+refused without decoding a token or taking a database connection.
+
+**Clients are keyed on `X-Forwarded-For`, not `getRemoteAddr()`.** Behind Render and Cloudflare the
+latter is a proxy, so every visitor in the world would share one bucket. That header is client-supplied
+and therefore spoofable; rather than pretend otherwise, the damage is bounded — the bucket store is an
+LRU capped at `max-tracked-clients`, so rotating fake addresses costs an attacker throughput but cannot
+exhaust the heap.
 
 ---
 
@@ -361,12 +410,14 @@ curl -i localhost:8080/api/inventory
 ./mvnw test
 ```
 
-**23 tests** across three suites, each testing at the level where it belongs.
+**39 tests** across five suites, each testing at the level where it belongs.
 
 | Suite | Tests | Approach | Covers |
 |---|---|---|---|
 | `ReceivingServiceTest` | 11 | Mockito-mocked mappers | Business rules in isolation: the tolerance boundary at exactly 110%, damaged-unit split, fully damaged delivery, duplicate and foreign lines, status transitions, and every terminal PO state via `@EnumSource`. Rejected requests are asserted to write **nothing**. |
 | `MapperIntegrationTest` | 11 | Real PostgreSQL, no mocks | Actual SQL: `resultMap` assembly of header + vendor + lines from joined rows, dynamic search (`<foreach>` `IN` clause, combined filters, sort allowlist), atomic in-place increment, audit-column maintenance, generated-key population, and `ON CONFLICT` upsert both inserting and accumulating. |
+| `RateLimiterTest` | 7 | Plain unit test | The bucket itself: exact burst size, independent clients, tiers that don't share a budget, a positive `Retry-After`, the LRU cap holding under spoofed addresses, and a configured rate of zero degrading to one rather than dividing by zero. |
+| `RateLimitFilterTest` | 9 | `MockHttpServletRequest` + `MockFilterChain` | HTTP behaviour: tier selection by path and verb, the `ProblemDetail` body and `Retry-After` header, keying on the leftmost `X-Forwarded-For` entry, proxy hops not creating new buckets, preflights never metered, and the disable switch. |
 | `ReceivingApplicationTests` | 1 | Full `@SpringBootTest` | Context startup — proves every bean can actually be constructed. Catches wiring failures no unit test sees. |
 
 Mapper tests run against a real database started in-process by
@@ -415,9 +466,15 @@ is what distinguishes it from a bad password. Session mode is used rather than t
 (port 6543) because transaction pooling disables server-side prepared statements, which MyBatis relies
 on for every `#{}` parameter.
 
-A single-origin deployment is deliberate: the API and any future UI ship together, so there is no CORS
-surface and one service to keep warm. Warehouse tooling is typically internal and served from the
-application server, so this matches the domain rather than defaulting to a split SPA/API topology.
+The UI is served from a different origin than the API — `zntsns.com/warehouse/` against
+`warehouse.zntsns.com` — so CORS is configured rather than avoided. `SecurityConfig` allows only the
+origins in `app.security.allowed-origins` (`ALLOWED_ORIGINS` in deployment), permits `GET`/`POST`/
+`OPTIONS`, and exposes `Location` and `Retry-After`. Credentials are not enabled: auth travels in the
+`Authorization` header, never a cookie.
+
+That allowlist holds production origins only, which is why the UI's dev server proxies `/api` and
+strips the browser's `Origin` header — a forwarded `localhost` origin is rejected, and proxying makes
+the request genuinely same-origin instead.
 
 **The live instance runs with the `dev` profile so the token endpoint is reachable for demonstration.**
 That is a demo affordance, not a production posture — a real deployment runs `prod`, where
@@ -473,7 +530,17 @@ An honest list — these are next, not oversights:
 - **No pagination.** `/api/inventory` and `/api/locations` return everything.
 - **Server clock.** The service calls `OffsetDateTime.now()` directly rather than an injected `Clock`,
   which makes time harder to assert in tests.
-- **No UI.** The API is the deliverable; a receiving screen is the next addition.
+- **Rate limiting is per instance.** The buckets live in memory, which is correct for a single
+  container but multiplies the effective rate by the replica count behind more than one. That is the
+  point to move to a shared store rather than extend the current class.
+- **No global write cap.** Limits are per client IP, so a distributed flood can still exhaust the
+  database's free-tier quota. A ceiling on total writes per minute would bound that.
 
 The schema carries dialect notes for DB2 — identity columns, `MERGE` versus `ON CONFLICT`, `TIMESTAMP`
 versus `TIMESTAMPTZ` — so the design ports to an enterprise DB2 environment without a rewrite.
+
+---
+
+## License
+
+Released under the **ISC License** — see [`LICENSE`](LICENSE).

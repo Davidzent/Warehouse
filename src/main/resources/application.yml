@@ -1,6 +1,6 @@
 spring:
   profiles:
-    default: prod
+    default: dev
   application:
     name: receiving
   datasource:
@@ -32,3 +32,9 @@ app:
   security:
     jwt-secret: ${JWT_SECRET:Zentinel-Was-Here-what-0123456789abcdef0123456789abcdef}
     allowed-origins: ${ALLOWED_ORIGINS:https://www.zntsns.com,https://zntsns.com}
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    token-mint-per-minute: ${RATE_LIMIT_TOKEN_MINT:5}
+    write-per-minute: ${RATE_LIMIT_WRITE:10}
+    read-per-minute: ${RATE_LIMIT_READ:60}
+    max-tracked-clients: 20000
