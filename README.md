@@ -28,6 +28,7 @@ and mirrored to [Warehouse-UI](https://github.com/Davidzent/Warehouse-UI).
 - [Endpoints](#endpoints)
 - [Error contract](#error-contract)
 - [Rate limiting](#rate-limiting)
+- [Keeping the demo alive](#keeping-the-demo-alive)
 - [Quickstart](#quickstart)
 - [Run with Docker](#run-with-docker)
 - [Walk the interesting paths](#walk-the-interesting-paths)
@@ -245,6 +246,33 @@ exhaust the heap.
 
 ---
 
+## Keeping the demo alive
+
+Receiving is cumulative and irreversible — that is the domain, not a shortcut. On a public demo it
+means ordinary use walks the data one way: every visitor who records a delivery moves a PO closer to
+`CLOSED`, and once PO 1000 closes, the next visitor loads the UI and is told the order cannot accept
+deliveries. No abuse required. Rate limits slow that down; they cannot undo it.
+
+So the seed is replayed on a schedule. `DemoDataResetService` clears the demo tables child-first and
+re-runs `data.sql` verbatim, both scripts on one connection in one transaction — a delete that
+committed without its reseed would leave the demo empty rather than merely stale.
+
+| Property | Default | Purpose |
+|---|---|---|
+| `app.demo.reset.enabled` | `true` | `DEMO_RESET_ENABLED=false` removes the beans entirely |
+| `app.demo.reset.initial-delay` | `PT5M` | after startup — free hosting stops when idle, so this is what a visitor after a cold start actually gets |
+| `app.demo.reset.interval` | `PT6H` | between runs on a long-lived instance |
+
+`fixedDelay` rather than `cron` is deliberate: the service is stopped when idle, so the clock restarts
+on every wake and the initial delay is the value that matters.
+
+**The whole thing is `dev`-profile only.** A `prod` deployment holds real receiving data and must never
+schedule a job that deletes it — `DemoDataResetAbsentInProdTest` asserts the beans are absent under
+`prod`, and the scheduler is deliberately *not* a `@Component`, since component scanning would create
+it regardless of the profile gate.
+
+---
+
 ## Quickstart
 
 **Prerequisites:** JDK 17+ and a PostgreSQL database named `warehouse`.
@@ -410,7 +438,7 @@ curl -i localhost:8080/api/inventory
 ./mvnw test
 ```
 
-**39 tests** across five suites, each testing at the level where it belongs.
+**48 tests** across seven suites, each testing at the level where it belongs.
 
 | Suite | Tests | Approach | Covers |
 |---|---|---|---|
@@ -418,6 +446,8 @@ curl -i localhost:8080/api/inventory
 | `MapperIntegrationTest` | 11 | Real PostgreSQL, no mocks | Actual SQL: `resultMap` assembly of header + vendor + lines from joined rows, dynamic search (`<foreach>` `IN` clause, combined filters, sort allowlist), atomic in-place increment, audit-column maintenance, generated-key population, and `ON CONFLICT` upsert both inserting and accumulating. |
 | `RateLimiterTest` | 7 | Plain unit test | The bucket itself: exact burst size, independent clients, tiers that don't share a budget, a positive `Retry-After`, the LRU cap holding under spoofed addresses, and a configured rate of zero degrading to one rather than dividing by zero. |
 | `RateLimitFilterTest` | 9 | `MockHttpServletRequest` + `MockFilterChain` | HTTP behaviour: tier selection by path and verb, the `ProblemDetail` body and `Retry-After` header, keying on the leftmost `X-Forwarded-For` entry, proxy hops not creating new buckets, preflights never metered, and the disable switch. |
+| `DemoDataResetServiceTest` | 5 | Real PostgreSQL, no Spring context | The reseed: receiving undone, extra receipts cleared, every table back to its seeded row count, idempotent across runs, and sequences still usable afterwards. No context on purpose — a rolled-back test transaction would hide the schema from the service's own connection. |
+| `DemoDataResetWiringTest` | 4 | Three `@SpringBootTest` contexts | Which profiles wire a job that deletes every row: present under `dev`, **absent under `prod`**, absent when the kill switch is off. |
 | `ReceivingApplicationTests` | 1 | Full `@SpringBootTest` | Context startup — proves every bean can actually be constructed. Catches wiring failures no unit test sees. |
 
 Mapper tests run against a real database started in-process by

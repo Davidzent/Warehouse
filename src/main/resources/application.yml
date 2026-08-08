@@ -38,3 +38,8 @@ app:
     write-per-minute: ${RATE_LIMIT_WRITE:10}
     read-per-minute: ${RATE_LIMIT_READ:60}
     max-tracked-clients: 20000
+  demo:
+    reset:
+      enabled: ${DEMO_RESET_ENABLED:true}
+      initial-delay: ${DEMO_RESET_INITIAL_DELAY:PT5M}
+      interval: ${DEMO_RESET_INTERVAL:PT6H}
