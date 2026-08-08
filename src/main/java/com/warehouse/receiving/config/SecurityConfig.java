@@ -7,6 +7,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -22,12 +23,17 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
 
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
+import com.warehouse.receiving.web.RateLimitFilter;
+
+import tools.jackson.databind.ObjectMapper;
 
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
+@EnableConfigurationProperties(RateLimitProperties.class)
 public class SecurityConfig {
 
     @Value("${app.security.jwt-secret}")
@@ -37,12 +43,28 @@ public class SecurityConfig {
     private List<String> allowedOrigins;
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public RateLimiter rateLimiter(RateLimitProperties properties) {
+        return new RateLimiter(properties);
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                                   RateLimiter rateLimiter,
+                                                   RateLimitProperties rateLimitProperties,
+                                                   ObjectMapper objectMapper) throws Exception {
+        // Not a @Bean: Boot auto-registers Filter beans in the servlet chain too,
+        // which would spend two permits per request.
+        RateLimitFilter rateLimitFilter =
+                new RateLimitFilter(rateLimiter, rateLimitProperties, objectMapper);
+
         http
             // Required on the chain, not just as a bean: the CORS filter must run
             // before authorization so unauthenticated preflights are not rejected.
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .csrf(csrf -> csrf.disable())
+            // After CORS so a 429 is readable by the browser; before authorization
+            // so a flood costs no token decode or database connection.
+            .addFilterAfter(rateLimitFilter, CorsFilter.class)
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/", "/index.html", "/app.js", "/vendor/**", "/favicon.ico").permitAll()
                 .requestMatchers("/api/auth/**").permitAll()
@@ -63,7 +85,8 @@ public class SecurityConfig {
         config.setAllowedOrigins(allowedOrigins);
         config.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
-        config.setExposedHeaders(List.of("Location")); // returned by POST /api/receipts
+        // Location: POST /api/receipts. Retry-After: 429s, unreadable unless exposed.
+        config.setExposedHeaders(List.of("Location", "Retry-After"));
         config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
